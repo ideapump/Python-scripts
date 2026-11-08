@@ -1,0 +1,21 @@
+
+
+services:
+  openemr:
+    image: openemr/openemr
+    ports:
+      - "8080:80"
+    environment:
+      - MYSQL_HOST=db
+      - MYSQL_ROOT_PASS=root_password
+      - MYSQL_USER=openemr
+      - MYSQL_PASS=openemr_password
+    depends_on:
+      - db
+  db:
+    image: mysql:8.1
+    environment:
+      - MYSQL_ROOT_PASSWORD=root_password
+      - MYSQL_USER=openemr
+      - MYSQL_PASSWORD=openemr_password
+      - MYSQL_DATABASE=openemr
