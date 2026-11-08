@@ -24,7 +24,7 @@ def on_mouse_activity(*args):
 
 
 def keep_display_active():
-    print("Workflow display helper running. ")
+    print("Workflow display helper running.")
     print("Waiting for 4 minutes of inactivity.")
     print("Press Ctrl+C to stop.")
 
