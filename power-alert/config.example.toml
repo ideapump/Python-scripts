@@ -1,0 +1,46 @@
+# Copy to config.toml and fill in. Keep it private: chmod 600 config.toml
+# Instead of putting secrets here you can set the environment variables
+# POWER_USERNAME, POWER_PASSWORD and GROUPME_BOT_ID.
+
+[site]
+login_url = "https://www.example-utility.com/login"
+usage_url = "https://www.example-utility.com/account/usage"   # the page with the daily usage table
+username  = "you@example.com"
+password  = "your-password"
+
+[selectors]
+# CSS selectors for the login form. Find them with right-click > Inspect in your browser.
+username = "input[name='username']"
+password = "input[type='password']"
+submit   = "button[type='submit']"
+# next_button = "button#next"     # only if the username and password are on separate screens
+
+# Things to click on the usage page to get to a DAILY table (tabs, "Table view", etc.), in order.
+# Playwright selectors, so text= works:  usage_clicks = ["text=Daily", "text=Table"]
+usage_clicks = []
+
+# The daily usage table
+row  = "table tbody tr"   # one element per day
+cell = "td"               # the cells inside each row
+date_col = 0              # which cell (counting from 0) has the date
+kwh_col  = 1              # which cell has the kWh number
+date_format = "%m/%d/%Y"  # e.g. 11/05/2026. Use "%b %d, %Y" for "Nov 05, 2026"
+# ready = "#usage-table"  # optional: an element that only exists once you're logged in
+
+[goal]
+target_kwh = 1050   # your safe target
+bonus_kwh  = 1000   # the real bonus threshold
+
+# The billing cycle. Either a fixed day of the month the cycle starts...
+cycle_start_day = 1
+# ...or exact dates from your bill (these win if set; update them each cycle):
+# cycle_start = 2026-11-01
+# cycle_end   = 2026-11-30
+
+[groupme]
+bot_id = "your-groupme-bot-id"   # from https://dev.groupme.com/bots
+
+[paths]
+database        = "usage.db"
+browser_profile = "browser-profile"
+debug_dir       = "debug"

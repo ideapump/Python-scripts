@@ -1,0 +1,10 @@
+[Unit]
+Description=Run power-alert several times a day (it only posts when a new day of data appears)
+
+[Timer]
+OnCalendar=*-*-* 07,10,13,16,19,22:05:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

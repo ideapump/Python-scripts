@@ -1,0 +1,10 @@
+[Unit]
+Description=Check electricity usage and post to GroupMe
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/power-alert
+ExecStart=%h/power-alert/.venv/bin/python %h/power-alert/power_alert.py
+TimeoutStartSec=300
