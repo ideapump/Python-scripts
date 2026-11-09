@@ -4,7 +4,7 @@ import pyautogui
 from pynput import keyboard, mouse
 
 # SETTINGS
-IDLE_SECONDS = 240  # 4 minutes
+IDLE_SECONDS = 240  #4 minutes
 
 last_activity = time.monotonic()
 
