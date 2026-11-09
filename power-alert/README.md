@@ -1,8 +1,40 @@
 # power-alert
 
-Logs into your electricity provider, reads your daily kWh, and posts a GroupMe
-update telling you whether you're on track for your goal (default 1050 kWh,
-safely over the 1000 kWh bonus).
+Reads your daily kWh, either from the usage CSV your electricity provider emails
+you or by logging into their website, and posts a GroupMe update telling you
+whether you're on track for your goal (default 1050 kWh, safely over the 1000
+kWh bonus).
+
+## Email mode (Gmail + CSV attachment)
+This is the simpler setup and doesn't need Playwright or a browser.
+
+1. Make a Gmail **app password**. 2-Step Verification must be on for your Google
+   account. Go to https://myaccount.google.com/apppasswords, create one named
+   "power-alert". It only works for this script, and you can revoke it anytime.
+   On a Mac, store it and the GroupMe bot ID in Keychain and leave
+   `app_password` and `bot_id` blank in `config.toml`:
+   ```bash
+   security add-generic-password -s power-alert -a gmail_app_password -w
+   security add-generic-password -s power-alert -a groupme_bot_id -w
+   ```
+   Add `-U` to change one later. Elsewhere, put them in `config.toml` or set the
+   `GMAIL_APP_PASSWORD` and `GROUPME_BOT_ID` environment variables.
+2. In `config.toml`, set `source = "email"` and fill in `[email]`: your Gmail
+   address and the address the usage emails come from (`sender`).
+3. Test it:
+   ```bash
+   python3 power_alert.py --dry-run --debug
+   ```
+   This prints the message instead of posting it and saves the CSVs it found
+   into `debug/`. If it picks the wrong columns, set `date_column` and
+   `kwh_column` under `[csv]` to the exact header text.
+
+The script opens Gmail read-only, so it never marks emails as read or changes
+them. It works whether the CSV has one row per day or hourly/15-minute rows,
+which it adds up per day. Then follow steps 1 and 4 below for the GroupMe bot
+and running it automatically. In step 2, skip the Playwright lines.
+
+## Website mode
 
 ## 1. Make the GroupMe bot
 1. Go to https://dev.groupme.com/bots and sign in.

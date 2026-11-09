@@ -1,0 +1,14 @@
+# Secrets and personal data - never commit these
+config.toml
+.env
+*.db
+browser-profile/
+debug/
+*.csv
+
+# Python
+.venv/
+__pycache__/
+
+# macOS
+.DS_Store

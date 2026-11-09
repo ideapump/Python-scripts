@@ -4,8 +4,9 @@ power_alert.py - Track electricity usage against a billing-cycle goal and
 report to a GroupMe bot.
 
 What it does on each run:
-  1. Logs into your utility website (headless Chromium via Playwright),
-     opens the usage-history page and reads the daily kWh table.
+  1. Gets your daily kWh, either from the usage CSVs your utility emails you
+     (source = "email", reads Gmail over IMAP) or by logging into your
+     utility website (source = "website", headless Chromium via Playwright).
   2. Saves every day it sees into a local SQLite file, so the cycle total
      builds up even if the site only shows a few recent days.
   3. Works out where you stand for the current billing cycle: total so far,
@@ -16,17 +17,21 @@ What it does on each run:
      it is safe to run several times a day.
 
 Run `python3 power_alert.py --help` for options.
-Requires Python 3.11+ and `pip install playwright && playwright install chromium`.
+Requires Python 3.11+. The website source also needs
+`pip install playwright && playwright install chromium`.
 """
 from __future__ import annotations
 
 import argparse
 import calendar
+import csv
+import io
 import json
 import logging
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import traceback
 import urllib.request
@@ -46,6 +51,17 @@ GROUPME_MAX = 990  # GroupMe caps bot messages at 1000 characters
 # --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
+def keychain(name: str) -> str:
+    """Read a secret saved with: security add-generic-password -s power-alert -a <name> -w"""
+    if sys.platform != "darwin":
+        return ""
+    r = subprocess.run(
+        ["security", "find-generic-password", "-s", "power-alert", "-a", name, "-w"],
+        capture_output=True, text=True,
+    )
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def load_config(path: Path) -> dict:
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
@@ -53,8 +69,13 @@ def load_config(path: Path) -> dict:
     site = cfg.setdefault("site", {})
     site["username"] = os.environ.get("POWER_USERNAME", site.get("username", ""))
     site["password"] = os.environ.get("POWER_PASSWORD", site.get("password", ""))
+    # Secrets left blank in the file come from the macOS Keychain
     gm = cfg.setdefault("groupme", {})
-    gm["bot_id"] = os.environ.get("GROUPME_BOT_ID", gm.get("bot_id", ""))
+    gm["bot_id"] = os.environ.get("GROUPME_BOT_ID") or gm.get("bot_id") or keychain("groupme_bot_id")
+    em = cfg.setdefault("email", {})
+    em["app_password"] = (
+        os.environ.get("GMAIL_APP_PASSWORD") or em.get("app_password") or keychain("gmail_app_password")
+    )
     return cfg
 
 
@@ -252,6 +273,111 @@ def fetch_usage(cfg: dict, debug: bool = False, headed: bool = False) -> dict[da
 
 
 # --------------------------------------------------------------------------
+# Email (CSV attachments)
+# --------------------------------------------------------------------------
+CSV_DATE_FORMATS = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d", "%b %d, %Y", "%d-%b-%Y")
+
+
+def _parse_csv_date(text: str, fmt: str | None) -> date | None:
+    if fmt:
+        return _parse_date(text, fmt)
+    text = text.strip()
+    try:
+        return datetime.fromisoformat(text).date()  # 2026-11-05, 2026-11-05 00:15, ...
+    except ValueError:
+        pass
+    for f in CSV_DATE_FORMATS:
+        d = _parse_date(text, f)
+        if d is not None:
+            return d
+    return None
+
+
+def _pick_column(names: list[str], wanted: str | None, hints: tuple[str, ...], skip: int | None = None) -> int | None:
+    if wanted:
+        wanted = wanted.strip().lower()
+        return names.index(wanted) if wanted in names else None
+    for hint in hints:
+        for i, n in enumerate(names):
+            if hint in n and i != skip:
+                return i
+    return None
+
+
+def parse_usage_csv(text: str, csv_cfg: dict) -> dict[date, float]:
+    """Total kWh per day from a usage CSV. Works for daily rows and for hourly/15-minute rows."""
+    rows = list(csv.reader(io.StringIO(text)))
+    # Some utilities put a few lines of account info above the real header row
+    for h, header in enumerate(rows):
+        names = [c.strip().lower() for c in header]
+        date_i = _pick_column(names, csv_cfg.get("date_column"), ("date", "day", "start", "time"))
+        kwh_i = _pick_column(names, csv_cfg.get("kwh_column"), ("kwh", "usage", "consumption"), skip=date_i)
+        if date_i is not None and kwh_i is not None:
+            break
+    else:
+        raise RuntimeError(
+            "Couldn't find the date and kWh columns in the CSV - set date_column and kwh_column under [csv]."
+        )
+
+    usage: dict[date, float] = {}
+    for row in rows[h + 1:]:
+        if len(row) <= max(date_i, kwh_i):
+            continue
+        d = _parse_csv_date(row[date_i], csv_cfg.get("date_format"))
+        k = _parse_kwh(row[kwh_i])
+        if d is not None and k is not None:
+            usage[d] = usage.get(d, 0.0) + k
+    return usage
+
+
+def fetch_usage_email(cfg: dict, debug: bool = False) -> dict[date, float]:
+    """Read the usage CSVs attached to recent emails from your utility. Returns {date: kWh}."""
+    import email
+    import imaplib
+
+    em = cfg["email"]
+    debug_dir = resolve(cfg.get("paths", {}).get("debug_dir", "debug"))
+    days_back = int(em.get("days_back", 10))
+    criteria = ["SINCE", (date.today() - timedelta(days=days_back)).strftime("%d-%b-%Y")]
+    if em.get("sender"):
+        criteria += ["FROM", f'"{em["sender"]}"']
+    if em.get("subject"):
+        criteria += ["SUBJECT", f'"{em["subject"]}"']
+
+    usage: dict[date, float] = {}
+    files = 0
+    with imaplib.IMAP4_SSL(em.get("imap_host", "imap.gmail.com")) as imap:
+        imap.login(em["address"], em["app_password"].replace(" ", ""))  # Google shows it as "abcd efgh ..."
+        imap.select(f'"{em.get("folder", "INBOX")}"', readonly=True)  # read-only: nothing gets marked as read
+        _, data = imap.search(None, *criteria)
+        # Oldest first, so a newer email's numbers replace an older one's for the same day
+        for num in data[0].split():
+            _, parts = imap.fetch(num, "(BODY.PEEK[])")
+            msg = email.message_from_bytes(parts[0][1])
+            for part in msg.walk():
+                name = part.get_filename() or ""
+                if not name.lower().endswith(".csv"):
+                    continue
+                text = part.get_payload(decode=True).decode("utf-8-sig", errors="replace")
+                if debug:
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    (debug_dir / Path(name).name).write_text(text, encoding="utf-8")
+                days = parse_usage_csv(text, cfg.get("csv", {}))
+                log.info("Read %d days from %s (%s)", len(days), name, msg.get("Subject", ""))
+                usage.update(days)
+                files += 1
+
+    if not files:
+        raise RuntimeError(
+            f"No CSV attachments found in emails from the last {days_back} days - check sender/subject under [email]."
+        )
+    if not usage:
+        raise RuntimeError("Found the CSV but couldn't read any date/kWh rows - check the [csv] settings.")
+    log.info("Got %d days (%s to %s)", len(usage), min(usage), max(usage))
+    return usage
+
+
+# --------------------------------------------------------------------------
 # Math
 # --------------------------------------------------------------------------
 @dataclass
@@ -393,7 +519,7 @@ def main() -> int:
     ap.add_argument("--config", default=str(HERE / "config.toml"))
     ap.add_argument("--dry-run", action="store_true", help="print the message instead of posting it")
     ap.add_argument("--force", action="store_true", help="post even if there's no new day of data")
-    ap.add_argument("--debug", action="store_true", help="save screenshots, HTML and JSON responses")
+    ap.add_argument("--debug", action="store_true", help="save screenshots, HTML, JSON responses and emailed CSVs")
     ap.add_argument("--headed", action="store_true", help="show the browser window (needs a display)")
     ap.add_argument("--demo", action="store_true", help="use fake data - no website, implies --dry-run")
     ap.add_argument("--test-groupme", action="store_true", help="send a test message and exit")
@@ -419,7 +545,10 @@ def main() -> int:
             args.dry_run = True
             usage = demo_usage(today, goal_cfg)
         else:
-            usage = fetch_usage(cfg, debug=args.debug, headed=args.headed)
+            if cfg.get("source", "website") == "email":
+                usage = fetch_usage_email(cfg, debug=args.debug)
+            else:
+                usage = fetch_usage(cfg, debug=args.debug, headed=args.headed)
             store.upsert(usage)
 
         # Use the cycle containing the newest data day (the site lags a day or two)
